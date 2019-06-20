@@ -30,7 +30,6 @@ static inline std::string get_main_classdef(const char* main_app_class) {
     return main_app_classdef;
 }
 
-//#define MAIN_APP_CLASS "cn/missfresh/application/MissFreshApplication" // You must modify here for the correct that you want.
 #define MAIN_APP_CLASS "com/example/hello/MainApplication" // You must modify here for the correct that you want.
 #define MAIN_APP_CLASSDEF get_main_classdef(MAIN_APP_CLASS).c_str()
 
