@@ -11,8 +11,8 @@
 #include "dump_dex.h"
 
 extern "C"
-JNIEXPORT jint JNICALL dumpDex(JNIEnv *env, jobject instance) {
+JNIEXPORT jint JNICALL dumpDex(JNIEnv *env, jobject instance, jint apilevel) {
 
-    return dump_dex(env, 21);
+    return dump_dex(env, apilevel/*21*/);
 
 }
