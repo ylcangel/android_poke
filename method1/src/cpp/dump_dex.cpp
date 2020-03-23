@@ -233,8 +233,6 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
     memset(dexbuf, 0, dexUtil->fileSize());
     memcpy(dexbuf, dexUtil->base(), dexUtil->fileSize());
 
-    CLS(dexUtil);
-
     u1* pDex = dexbuf;
 
     srand((unsigned)time(NULL));
