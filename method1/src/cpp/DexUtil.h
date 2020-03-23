@@ -578,7 +578,7 @@ public:
     }
 
     u4 methodCount() {
-        return 0;
+        return mDexFile->pHeader->methodIdsSize;
     }
 
     u4 checksum() {
