@@ -169,6 +169,22 @@ enum {
 };
 
 /*
+ * Enumeration of all the primitive types.
+ */
+enum PrimitiveType {
+    PRIM_NOT        = 0,       /* value is a reference type, not a primitive type */
+    PRIM_VOID       = 1,
+    PRIM_BOOLEAN    = 2,
+    PRIM_BYTE       = 3,
+    PRIM_SHORT      = 4,
+    PRIM_CHAR       = 5,
+    PRIM_INT        = 6,
+    PRIM_LONG       = 7,
+    PRIM_FLOAT      = 8,
+    PRIM_DOUBLE     = 9,
+};
+
+/*
  * Direct-mapped "map_item".
  */
 struct DexMapItem {
@@ -429,42 +445,6 @@ struct DexFile {
     /* additional app-specific data structures associated with the DEX */
     //void*               auxData;
 };
-struct DexFile_Amazon {
-    /* directly-mapped "opt" header */
-    const DexOptHeader* pOptHeader;
-
-    /* pointers to directly-mapped structs and arrays in base DEX */
-    const DexHeader*    pHeader;
-    const DexStringId*  pStringIds;
-    const DexTypeId*    pTypeIds;
-    const DexFieldId*   pFieldIds;
-    const DexMethodId*  pMethodIds;
-
-    const DexStringId*  pStringIds2;
-    const DexProtoId*   pProtoIds;
-    const DexClassDef*  pClassDefs;
-    const DexFieldId*   pFieldIds2;
-    const DexMethodId*  pMethodIds2;
-    const DexLink*      pLinkData;
-
-    /*
-     * These are mapped out of the "auxillary" section, and may not be
-     * included in the file.
-     */
-    const DexClassLookup* pClassLookup;
-    const void*         pRegisterMapPool;       // RegisterMapClassPool
-
-    /* points to start of DEX file data */
-    const u1*           baseAddr;
-
-    /* track memory overhead for auxillary structures */
-    u4                  fieldSize;
-    u4                  methodsSize;
-    u4                  stringSize;
-
-    /* additional app-specific data structures associated with the DEX */
-    //void*               auxData;
-};
 
 /*
  * Map constant pool indices from one form to another.  Some or all of these
@@ -530,8 +510,6 @@ struct DexFile2X {
     //void*               auxData;
 };
 
-
-
 class UpdateClassDataFilter {
 
 public:
@@ -542,6 +520,7 @@ public:
 class DexUtil {
 public:
     DexUtil(const u1* addr);
+    ~DexUtil();
 
 public:
     static bool isDex(const u1* addr);
@@ -549,24 +528,53 @@ public:
     static u4 getNativeCountInDexClassData(DexClassData* classDataItem);
 
 public:
+
+/*
+* Get the type descriptor character associated with a given primitive
+* type. This returns '\0' if the type is invalid.
+*/
+    char dexGetPrimitiveTypeDescriptorChar(PrimitiveType type);
+
+/*
+ * Get the type descriptor string associated with a given primitive
+ * type.
+ */
+    const char* dexGetPrimitiveTypeDescriptor(PrimitiveType type);
+
+/*
+ * Get the boxed type descriptor string associated with a given
+ * primitive type. This returns NULL for an invalid type, including
+ * particularly for type "void". In the latter case, even though there
+ * is a class Void, there's no such thing as a boxed instance of it.
+ */
+    const char* dexGetBoxedTypeDescriptor(PrimitiveType type);
+
+/*
+ * Get the primitive type constant from the given descriptor character.
+ * This returns PRIM_NOT (note: this is a 0) if the character is invalid
+ * as a primitive type descriptor.
+ */
+    PrimitiveType dexGetPrimitiveTypeFromDescriptorChar(char descriptorChar);
+
+public:
     const u1* base() {
-        return mAddr;
+        return mDexFile->baseAddr;
     }
 
     u4 fileSize() {
-        return mHeader->fileSize;
+        return mDexFile->pHeader->fileSize;
     }
 
     u4 getTypeIdsSize() {
-        return mHeader->typeIdsSize;
+        return mDexFile->pHeader->typeIdsSize;
     }
 
     const DexHeader* header() {
-        return mHeader;
+        return mDexFile->pHeader;
     }
 
     u4 classCount() {
-        return mHeader->classDefsSize;
+        return mDexFile->pHeader->classDefsSize;
     }
 
     u4 methodCount() {
@@ -574,7 +582,7 @@ public:
     }
 
     u4 checksum() {
-        return mHeader->checksum;
+        return mDexFile->pHeader->checksum;
     }
 
     u4 classDescriptorHash(const char* str);
@@ -589,18 +597,30 @@ public:
 
     DexClassLookup* dexCreateClassLookup();
     void classLookupAdd(DexClassLookup* pLookup, int stringOff, int classDefOff, int* pNumProbes);
-    void* dexFileSetupBasicPointers(u1* data, bool is2x);
+
     DexClassData* dexReadAndVerifyClassData(const u1** pData, const u1* pLimit);
 
+    void dexFileSetupBasicPointers(DexFile* pDexFile, const u1* data);
+
+
+     const DexCode* dexGetCode( const DexMethod* pDexMethod) {
+        if (pDexMethod->codeOff == 0)
+            return NULL;
+        return (const DexCode*) (mDexFile->baseAddr + pDexMethod->codeOff);
+    }
+
+    const u4 getDexCodeSize(const DexCode* dexCode) {
+        return sizeof(DexCode) + dexCode->insnsSize;
+    }
+
     const DexClassDef* dexGetClassDef(u4 idx) {
-        const DexClassDef* classDef = (const DexClassDef*)(mAddr + mHeader->classDefsOff);
-        return &classDef[idx];
+        assert(idx < classCount());
+        return &mDexFile->pClassDefs[idx];
     }
 
     const DexTypeId* dexGetTypeId(u4 idx) {
-        assert(idx < mHeader->typeIdsSize);
-        const DexTypeId* pTypeIds = (const DexTypeId*)(mAddr + mHeader->typeIdsOff);
-        return &pTypeIds[idx];
+        assert(idx < mDexFile->pHeader->typeIdsSize);
+        return &mDexFile->pTypeIds[idx];
     }
 
     const char* dexStringByTypeIdx(u4 idx) {
@@ -609,7 +629,7 @@ public:
     }
 
     const char* dexGetStringData(const DexStringId* pStringId) {
-        const u1* ptr = mAddr + pStringId->stringDataOff;
+        const u1* ptr = mDexFile->baseAddr + pStringId->stringDataOff;
 
         // Skip the uleb128 length.
         while (*(ptr++) > 0x7f) /* empty */ ;
@@ -618,8 +638,8 @@ public:
     }
 
     const DexStringId* dexGetStringId(u4 idx) {
-        assert(idx < mHeader->stringIdsSize);
-        const DexStringId* pStringIds = (const DexStringId*)(mAddr + mHeader->stringIdsOff);
+        assert(idx < mDexFile->pHeader->stringIdsSize);
+        const DexStringId* pStringIds = (const DexStringId*)(mDexFile->pStringIds);
         return &pStringIds[idx];
     }
 
@@ -639,13 +659,13 @@ public:
     }
 
     const DexMethodId* dexGetMethodId(u4 idx) {
-        assert(idx < mHeader->methodIdsSize);
-        const DexMethodId* pMethodIds = (const DexMethodId*) (mAddr + mHeader->methodIdsOff);
+        assert(idx < mDexFile->pHeader->methodIdsSize);
+        const DexMethodId* pMethodIds = (const DexMethodId*) (mDexFile->pMethodIds);
         return &pMethodIds[idx];
     }
 
     const DexProtoId* dexGetProtoId(u4 idx) {
-        const DexProtoId* pProtoIds = (const DexProtoId*) (mAddr + mHeader->protoIdsOff);
+        const DexProtoId* pProtoIds = (const DexProtoId*) (mDexFile->pProtoIds);
         return &pProtoIds[idx];
     }
 
@@ -653,22 +673,23 @@ public:
         if (pProtoId->parametersOff == 0) {
             return NULL;
         }
-        return (const DexTypeList*)(mAddr + pProtoId->parametersOff);
+        return (const DexTypeList*)(mDexFile->baseAddr + pProtoId->parametersOff);
     }
 
     const u1* dexGetClassData(const DexClassDef& classDef) const {
         if (classDef.classDataOff == 0) {
             return NULL;
         } else {
-            return mAddr + classDef.classDataOff;
+            return mDexFile->baseAddr + classDef.classDataOff;
         }
     }
 
-private:
-    const u1*  mAddr;
+    const DexFile* getDexFile() {
+        return mDexFile;
+    }
 
-    const DexOptHeader* mOptHeader;
-    const DexHeader* mHeader;
+private:
+    DexFile* mDexFile;
 };
 
 #endif // __DEX_UTIL_H__

@@ -4,28 +4,33 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
-#include <zlib.h>
 #include <sys/mman.h>
+#include <errno.h>
 #include <sys/system_properties.h>
 
-
-#include "GlobalMarco.h"
 #include "Leb128.h"
-extern int __system_property_get(const char* prop, char* value);
 
 DexUtil::DexUtil(const u1* addr) {
-    mAddr = addr;
+    mDexFile = (DexFile*) malloc(sizeof(DexFile));
+    assert(mDexFile != NULL);
 
-    if (isDex(addr)) {
-        mHeader = reinterpret_cast<const DexHeader*>(mAddr);
-        mOptHeader = NULL;
-    } else if (isOptDex(addr)) {
-        mOptHeader = (const DexOptHeader*)mAddr;
-        mAddr = addr + mOptHeader->dexOffset;
-        mHeader = reinterpret_cast<const DexHeader*>(mAddr);
-    } else {
-        ALOGI("[*] DexUtil::DexUtil(), is not dex or Opt header");
-        mHeader = NULL;
+    memset((void*)mDexFile, 0, sizeof(DexFile));
+
+    if (isOptDex(addr)) {
+        mDexFile->pOptHeader = (const DexOptHeader *) addr;
+        ALOGV("[*] Good opt header, DEX offset is %d, flags=0x%02x",
+              mDexFile->pOptHeader->dexOffset, mDexFile->pOptHeader->flags);
+
+        addr += mDexFile->pOptHeader->dexOffset;
+    }
+
+    dexFileSetupBasicPointers(mDexFile, addr);
+}
+
+DexUtil::~DexUtil() {
+    if (mDexFile) {
+        free(mDexFile);
+        mDexFile = NULL;
     }
 }
 
@@ -90,9 +95,9 @@ void DexUtil::classLookupAdd(DexClassLookup* pLookup,
                              int stringOff, int classDefOff, int* pNumProbes)
 {
     const char* classDescriptor =
-            (const char*) (mAddr + stringOff);
+            (const char*) (mDexFile->baseAddr + stringOff);
     const DexClassDef* pClassDef =
-            (const DexClassDef*) (mAddr + classDefOff);
+            (const DexClassDef*) (mDexFile->baseAddr + classDefOff);
     u4 hash = classDescriptorHash(classDescriptor);
     int mask = pLookup->numEntries-1;
     int idx = hash & mask;
@@ -117,7 +122,7 @@ void DexUtil::classLookupAdd(DexClassLookup* pLookup,
 
 bool DexUtil::hasNative() {
     bool isHasNative = false;
-    for (int i = 0; i < (int)mHeader->classDefsSize; i++ ) {
+    for (int i = 0; i < (int) mDexFile->pHeader->classDefsSize; i++ ) {
         const DexClassDef* pClassDef;
         pClassDef = dexGetClassDef(i);
         const u1* pEncodedData = dexGetClassData(*pClassDef);
@@ -154,7 +159,7 @@ bool DexUtil::hasNative() {
 }
 
 int DexUtil::findClassIndex(const char* name) {
-    for (int i = 0; i < (int)mHeader->classDefsSize; i++ ) {
+    for (int i = 0; i < (int) mDexFile->pHeader->classDefsSize; i++ ) {
         const DexClassDef* pClassDef = dexGetClassDef(i);
         const char* className = dexStringByTypeIdx(pClassDef->classIdx);
         // ALOGD("[*] className=%s", className);
@@ -481,9 +486,6 @@ DexClassData* DexUtil::dexReadAndVerifyClassData(const u1** pData, const u1* pLi
 
 DexClassLookup* DexUtil::dexCreateClassLookup() {
     ALOGI("[*] DexUtil::dexCreateClassLookup()");
-    if(mHeader == NULL) {
-        ALOGI("[-] Error, mHeader is null");
-    }
     DexClassLookup* pLookup;
     int allocSize;
     int i, numEntries;
@@ -491,14 +493,9 @@ DexClassLookup* DexUtil::dexCreateClassLookup() {
 
     numProbes = totalProbes = maxProbes = 0;
 
-    /*
-    * Using a factor of 3 results in far less probing than a factor of 2,
-    * but almost doubles the flash storage requirements for the bootstrap
-    * DEX files.  The overall impact on class loading performance seems
-    * to be minor.  We could probably get some performance improvement by
-    * using a secondary hash.
-    */
-    numEntries = dexRoundUpPower2(mHeader->classDefsSize * 2);
+    assert(mDexFile != NULL);
+
+    numEntries = dexRoundUpPower2(mDexFile->pHeader->classDefsSize * 2);
     allocSize = offsetof(DexClassLookup, table)
                 + numEntries * sizeof(pLookup->table[0]);
 
@@ -508,7 +505,7 @@ DexClassLookup* DexUtil::dexCreateClassLookup() {
     pLookup->size = allocSize;
     pLookup->numEntries = numEntries;
 
-    for (i = 0; i < (int)mHeader->classDefsSize; i++) {
+    for (i = 0; i < (int)mDexFile->pHeader->classDefsSize; i++) {
         const DexClassDef* pClassDef;
         const char* pString;
 
@@ -516,124 +513,99 @@ DexClassLookup* DexUtil::dexCreateClassLookup() {
         pString = dexStringByTypeIdx(pClassDef->classIdx);
 
         classLookupAdd(pLookup,
-                       (u1*)pString - mAddr,
-                       (u1*)pClassDef - mAddr, &numProbes);
+                       (u1*)pString - mDexFile->baseAddr,
+                       (u1*)pClassDef - mDexFile->baseAddr, &numProbes);
 
         if (numProbes > maxProbes)
             maxProbes = numProbes;
         totalProbes += numProbes;
     }
 
-    ALOGI("[*] Class lookup: classes=%d slots=%d (%d%% occ) alloc=%d"
-             " total=%d max=%d",
-             mHeader->classDefsSize, numEntries,
-             (100 * mHeader->classDefsSize) / numEntries,
-             allocSize, totalProbes, maxProbes);
+    ALOGV("[*] Class lookup: classes=%d slots=%d (%d%% occ) alloc=%d"
+                  " total=%d max=%d",
+          mDexFile->pHeader->classDefsSize, numEntries,
+          (100 * mDexFile->pHeader->classDefsSize) / numEntries,
+          allocSize, totalProbes, maxProbes);
 
     return pLookup;
 }
 
-typedef DexClassLookup* (*DVM_DexCreateClassLookup)(void* dexfile);
-static DexClassLookup* dvmDexCreateClassLookup(void* dexfile) {
-    void* dl;
-    DVM_DexCreateClassLookup func;
 
-    dl = dlopen("libdvm.so", RTLD_NOW);
-    if (dl) {
-        func = (DVM_DexCreateClassLookup)dlsym(dl, "dexCreateClassLookup");
-        if (func) {
-            ALOGI("[*] dvmDexCreateClassLookup");
-            return (*func)(dexfile);
-        }
+/*
+ * Set up the basic raw data pointers of a DexFile. This function isn't
+ * meant for general use.
+ */
+void DexUtil::dexFileSetupBasicPointers(DexFile* pDexFile, const u1* data) {
+    DexHeader *pHeader = (DexHeader*) data;
+
+    pDexFile->baseAddr = data;
+    pDexFile->pHeader = pHeader;
+    pDexFile->pStringIds = (const DexStringId*) (data + pHeader->stringIdsOff);
+    pDexFile->pTypeIds = (const DexTypeId*) (data + pHeader->typeIdsOff);
+    pDexFile->pFieldIds = (const DexFieldId*) (data + pHeader->fieldIdsOff);
+    pDexFile->pMethodIds = (const DexMethodId*) (data + pHeader->methodIdsOff);
+    pDexFile->pProtoIds = (const DexProtoId*) (data + pHeader->protoIdsOff);
+    pDexFile->pClassDefs = (const DexClassDef*) (data + pHeader->classDefsOff);
+    pDexFile->pLinkData = (const DexLink*) (data + pHeader->linkOff);
+}
+
+/* (documented in header) */
+const char* DexUtil::dexGetPrimitiveTypeDescriptor(PrimitiveType type) {
+    switch (type) {
+        case PRIM_VOID:    return "V";
+        case PRIM_BOOLEAN: return "Z";
+        case PRIM_BYTE:    return "B";
+        case PRIM_SHORT:   return "S";
+        case PRIM_CHAR:    return "C";
+        case PRIM_INT:     return "I";
+        case PRIM_LONG:    return "J";
+        case PRIM_FLOAT:   return "F";
+        case PRIM_DOUBLE:  return "D";
+        default:           return NULL;
     }
 
-    ALOGI("[*] dvmDexCreateClassLookup");
     return NULL;
 }
 
-void* DexUtil::dexFileSetupBasicPointers(u1* data, bool is2x) {
+/* (documented in header) */
+char DexUtil::dexGetPrimitiveTypeDescriptorChar(PrimitiveType type) {
+    const char* string = dexGetPrimitiveTypeDescriptor(type);
+
+    return (string == NULL) ? '\0' : string[0];
+}
 
 
-    DexHeader *pHeader = (DexHeader*) data;
-    //ALOGI("dexFileSetupBasicPointers %c %c %c %c", data[0], data[1], data[2], data[3]);
-    DexUtil* paddingDex = new DexUtil(data);
-    ALOGI("[*] dexFileSetupBasicPointers paddingDex: %p", paddingDex);
-    char brand[128];
-    memset(brand, 0, PROP_VALUE_MAX);
-    bool isAmazon = false;
-    if(__system_property_get("ro.product.brand", brand) > 0 && strstr(brand, "Amazon") != NULL) {
-        isAmazon = true;
-        ALOGI("[*] This is Amazon");
+
+/* (documented in header) */
+const char* DexUtil::dexGetBoxedTypeDescriptor(PrimitiveType type) {
+    switch (type) {
+        case PRIM_VOID:    return NULL;
+        case PRIM_BOOLEAN: return "Ljava/lang/Boolean;";
+        case PRIM_BYTE:    return "Ljava/lang/Byte;";
+        case PRIM_SHORT:   return "Ljava/lang/Short;";
+        case PRIM_CHAR:    return "Ljava/lang/Character;";
+        case PRIM_INT:     return "Ljava/lang/Integer;";
+        case PRIM_LONG:    return "Ljava/lang/Long;";
+        case PRIM_FLOAT:   return "Ljava/lang/Float;";
+        case PRIM_DOUBLE:  return "Ljava/lang/Double;";
+        default:           return NULL;
     }
-    void* ret = NULL;
-    if (is2x) {
-        DexFile2X* pDexFile = (DexFile2X*) malloc(sizeof(DexFile2X));
-        memset(pDexFile, 0, sizeof(DexFile2X));
-        pDexFile->baseAddr = data;
+}
 
-        pDexFile->pHeader = pHeader;
-        pDexFile->pStringIds = (const DexStringId*) (data + pHeader->stringIdsOff);
-        pDexFile->pTypeIds = (const DexTypeId*) (data + pHeader->typeIdsOff);
-        pDexFile->pFieldIds = (const DexFieldId*) (data + pHeader->fieldIdsOff);
-        pDexFile->pMethodIds = (const DexMethodId*) (data + pHeader->methodIdsOff);
-        pDexFile->pProtoIds = (const DexProtoId*) (data + pHeader->protoIdsOff);
-        pDexFile->pClassDefs = (const DexClassDef*) (data + pHeader->classDefsOff);
-        pDexFile->pLinkData = (const DexLink*) (data + pHeader->linkOff);
-
-        pDexFile->pClassLookup = paddingDex->dexCreateClassLookup();
-        pDexFile->pRegisterMapPool = NULL; // paddingDex->dexCreateRegisterMapPool();
-
-        ALOGI("[*] 2x dexFileSetupBasicPointers pClassLookup: %p", pDexFile->pClassLookup);
-        ret = pDexFile;
-    } else if (isAmazon) {
-        DexFile_Amazon* pDexFile = (DexFile_Amazon*) malloc(sizeof(DexFile_Amazon));
-        memset(pDexFile, 0, sizeof(DexFile_Amazon));
-        pDexFile->baseAddr = data;
-
-        pDexFile->pHeader = pHeader;
-        pDexFile->pStringIds = (const DexStringId*) (data + pHeader->stringIdsOff);
-        pDexFile->pStringIds2 = (const DexStringId*) (data + pHeader->stringIdsOff);
-        pDexFile->pTypeIds = (const DexTypeId*) (data + pHeader->typeIdsOff);
-        pDexFile->pFieldIds = (const DexFieldId*) (data + pHeader->fieldIdsOff);
-        pDexFile->pFieldIds2 = (const DexFieldId*) (data + pHeader->fieldIdsOff);
-        pDexFile->pMethodIds = (const DexMethodId*) (data + pHeader->methodIdsOff);
-        pDexFile->pMethodIds2 = (const DexMethodId*) (data + pHeader->methodIdsOff);
-        pDexFile->pProtoIds = (const DexProtoId*) (data + pHeader->protoIdsOff);
-        pDexFile->pClassDefs = (const DexClassDef*) (data + pHeader->classDefsOff);
-        pDexFile->pLinkData = (const DexLink*) (data + pHeader->linkOff);
-
-        pDexFile->fieldSize = pHeader->fieldIdsSize;
-        pDexFile->methodsSize = pHeader->methodIdsSize;
-        pDexFile->stringSize = pHeader->stringIdsSize;
-        pDexFile->pClassLookup = paddingDex->dexCreateClassLookup();
-        pDexFile->pRegisterMapPool = NULL; // paddingDex->dexCreateRegisterMapPool();
-
-        ALOGI("[*] dexFileSetupBasicPointers pClassLookup: %p", pDexFile->pClassLookup);
-        ret = pDexFile;
-    } else {
-        DexFile* pDexFile = (DexFile*) malloc(sizeof(DexFile));
-        memset(pDexFile, 0, sizeof(DexFile));
-        pDexFile->baseAddr = data;
-
-        pDexFile->pHeader = pHeader;
-        pDexFile->pStringIds = (const DexStringId*) (data + pHeader->stringIdsOff);
-        pDexFile->pTypeIds = (const DexTypeId*) (data + pHeader->typeIdsOff);
-        pDexFile->pFieldIds = (const DexFieldId*) (data + pHeader->fieldIdsOff);
-        pDexFile->pMethodIds = (const DexMethodId*) (data + pHeader->methodIdsOff);
-        pDexFile->pProtoIds = (const DexProtoId*) (data + pHeader->protoIdsOff);
-        pDexFile->pClassDefs = (const DexClassDef*) (data + pHeader->classDefsOff);
-        pDexFile->pLinkData = (const DexLink*) (data + pHeader->linkOff);
-
-        pDexFile->pClassLookup = paddingDex->dexCreateClassLookup();
-        pDexFile->pRegisterMapPool = NULL; // paddingDex->dexCreateRegisterMapPool();
-
-        ALOGI("[*] dexFileSetupBasicPointers pClassLookup: %p", pDexFile->pClassLookup);
-        ret = pDexFile;
+/* (documented in header) */
+PrimitiveType DexUtil::dexGetPrimitiveTypeFromDescriptorChar(char descriptorChar) {
+    switch (descriptorChar) {
+        case 'V': return PRIM_VOID;
+        case 'Z': return PRIM_BOOLEAN;
+        case 'B': return PRIM_BYTE;
+        case 'S': return PRIM_SHORT;
+        case 'C': return PRIM_CHAR;
+        case 'I': return PRIM_INT;
+        case 'J': return PRIM_LONG;
+        case 'F': return PRIM_FLOAT;
+        case 'D': return PRIM_DOUBLE;
+        default:  return PRIM_NOT;
     }
-
-    delete paddingDex;
-
-    return ret;
 }
 
 // end of file
