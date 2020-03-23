@@ -301,8 +301,11 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
     assert(!codelist);
 
     // repair classoff
+    DexHeader* header = (DexHeader*) dexbuf;
+    DexClassDef* classDef = (DexClassDef* )((u1*) dexbuf + header->classDefsOff);
     DexUtil* dexUtil1r = new DexUtil(dexbuf);
-    repair_class_data_off(dexUtil1r, classdataList);
+
+    repair_class_data_off(classDef, header->classDefsSize, classdataList);
 
     u1* class_data_buf = repair_codeoff(dexUtil, classdataList, codelist);
     assert(!class_data_buf);
@@ -314,7 +317,7 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
     }
 
     // reapair header filesize
-    DexHeader* header = (DexHeader*) dexbuf;
+
     header->fileSize += (classdataList->all_size + codelist->all_size);
     // write origin dexfile
     write(fd, dexbuf, dexFile->pHeader->fileSize);
@@ -424,10 +427,10 @@ static List* make_code_item(DexUtil* dexUtil, IS_OUT is_out) {
 }
 
 
-static void repair_class_data_off(DexUtil* dexUtil, List* class_data_list) {
-    for(int i = 0; i < dexUtil->classCount(); i++) {
-        DexClassDef* classDef = const_cast<DexClassDef *>(dexUtil->dexGetClassDef(i));
-        classDef->classDataOff = class_data_list->next[i]->off;
+static void repair_class_data_off(DexClassDef* classDef, u4 classCount, List* class_data_list) {
+    for(int i = 0; i < classCount; i++) {
+        DexClassDef* _classDef = &classDef[i];
+        _classDef->classDataOff = class_data_list->next[i]->off;
     }
 }
 

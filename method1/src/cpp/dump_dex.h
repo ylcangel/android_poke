@@ -243,7 +243,7 @@ static void list_free(List* list) {
 }
 
 static List* make_class_data(DexUtil* dexUtil, IS_OUT is_out);
-static void repair_class_data_off(DexUtil* dexUtil, List* class_data_list);
+static void repair_class_data_off(DexClassDef* classDef, u4 classCount, List* class_data_list);
 static List* make_code_item(DexUtil* dexUtil, IS_OUT is_out);
 static u1* repair_codeoff(DexUtil* dexUtil, List* class_data_list, List* codelist);
 
