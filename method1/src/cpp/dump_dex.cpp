@@ -319,7 +319,7 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
 
     header->fileSize += (classdataList->all_size + codelist->all_size);
     // write origin dexfile
-    write(fd, dexbuf, dexFile->pHeader->fileSize);
+    write(fd, dexbuf, dexUtil->fileSize());
     fsync(fd);
     // append class_data
     write(fd, class_data_buf, classdataList->all_size);
