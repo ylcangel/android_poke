@@ -303,7 +303,6 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
     // repair classoff
     DexHeader* header = (DexHeader*) dexbuf;
     DexClassDef* classDef = (DexClassDef* )((u1*) dexbuf + header->classDefsOff);
-    DexUtil* dexUtil1r = new DexUtil(dexbuf);
 
     repair_class_data_off(classDef, header->classDefsSize, classdataList);
 
@@ -338,8 +337,6 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
     list_free(codelist);
 
     CLS(dexUtil);
-    CLS(dexUtil1r);
-
     return JNI_OK;
 }
 
