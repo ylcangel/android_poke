@@ -233,79 +233,81 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
     memset(dexbuf, 0, dexUtil->fileSize());
     memcpy(dexbuf, dexUtil->base(), dexUtil->fileSize());
 
-    u1* pDex = dexbuf;
-
     srand((unsigned)time(NULL));
     int random_class_def_n = (rand() % dexUtil->classCount() + 1);
     const DexClassDef* classDefr =  dexUtil->dexGetClassDef(random_class_def_n);
     const char* declaring_class = dexUtil->dexStringByTypeIdx(classDefr->classIdx);
-
     ALOGI("[*] Find class %s!",  declaring_class);
-
     // 主动调用一次，虽然可能没有意义, 一般这个时候加固dex主activity已经启动
     find_class(env, declaring_class);
 
     IS_OUT is_out;
 
-    // 在这里我们假设classdef没有被抽取，也确实很多加固并没有对其抽取
-    // 我们假设抽取部分仅为class_data、code_item
-    const u1* pEncodedDatar = dexUtil->dexGetClassData(*classDefr);
-    DexClassData* pClassDatar = dexUtil->dexReadAndVerifyClassData(&pEncodedDatar, NULL);
-    assert(pClassDatar != NULL);
+    // 之前用随机方式选择method->codeitem，但是只随机一次可能导致codeitem为空
+    // 这样会让is_code_item_out = true ，而产生bug
+    for(int i = 0 ; i < dexUtil->classCount(); i++) {
+        const DexClassDef* classDef =  dexUtil->dexGetClassDef(i);
+        // 在这里我们假设classdef没有被抽取，也确实很多加固并没有对其抽取
+        // 我们假设抽取部分仅为class_data、code_item
+        const u1* pEncodedData = dexUtil->dexGetClassData(*classDef);
+        DexClassData* pClassData = dexUtil->dexReadAndVerifyClassData(&pEncodedData, NULL);
 
-    ALOGV("[*] Class data item[%d] = %x\n", random_class_def_n, (u4)pClassDatar);
+        assert(pClassData != NULL);
 
-    if(is_outof_dex((u4)dexUtil->base(), dexUtil->fileSize(), (u4)pClassDatar)) {
-        is_out.is_class_data_item_out = true;
+        ALOGV("[*] Class data item[%d] = %x\n", i, (u4)pEncodedData);
+
+        if(i == 0 && is_outof_dex((u4)dexUtil->base(), dexUtil->fileSize(), (u4)pEncodedData)) {
+            is_out.is_class_data_item_out = true;
+        }
+
+        bool is_set_out = false;
+        DexMethod* pDexMethod;
+        int methodsSize = (int)pClassData->header.directMethodsSize;
+        for(int j = 0; j < methodsSize; j++) {
+            pDexMethod = &pClassData->directMethods[j];
+            if(!(dexUtil->dexGetCode(pDexMethod)) && is_outof_dex((u4)dexUtil->base(), dexUtil->fileSize(), (u4)(dexUtil->base() + pDexMethod->codeOff)) ) {
+                is_out.is_code_item_out = true;
+                is_set_out = true;
+                break;
+            }
+        }
+
+        if(!is_set_out) {
+            methodsSize = (int)pClassData->header.virtualMethodsSize;
+            for(int j = 0; j < methodsSize; j++) {
+                pDexMethod = &pClassData->virtualMethods[j];
+                if(!(dexUtil->dexGetCode(pDexMethod)) && is_outof_dex((u4)dexUtil->base(), dexUtil->fileSize(), (u4)(dexUtil->base() + pDexMethod->codeOff)) ) {
+                    is_out.is_code_item_out = true;
+                    is_set_out = true;
+                    break;
+                }
+            }
+        } else {
+            break;
+        }
+
+        if(!is_set_out)
+            continue;
+        else
+            break;
+
+        C_CLS(pClassData);
     }
-
-    typedef struct {
-        int random_method_item_n;
-        bool is_directMehtod;
-    } MethodRandom;
-
-    MethodRandom mr;
-    int methodsSize = (int)pClassDatar->header.directMethodsSize;
-    srand((unsigned)time(NULL));
-    mr.random_method_item_n = (rand() % methodsSize + 1);
-    mr.is_directMehtod = true;
-
-    if(methodsSize == 0) {
-        methodsSize = (int)pClassDatar->header.virtualMethodsSize;
-        srand((unsigned)time(NULL));
-        mr.random_method_item_n = (rand() % methodsSize + 1);
-        mr.is_directMehtod = false;
-    }
-
-    const DexMethod* pDexMethodr;
-    if(mr.is_directMehtod) {
-        pDexMethodr = &pClassDatar->directMethods[mr.random_method_item_n];
-    } else {
-        pDexMethodr = &pClassDatar->virtualMethods[mr.random_method_item_n];
-    }
-
-    ALOGV("[*] DexMethod[%d] = %x, code off = %x\n", mr.random_method_item_n, (u4)pDexMethodr, (u4)(dexUtil->base() + pDexMethodr->codeOff));
-
-    if(is_outof_dex((u4)dexUtil->base(), dexUtil->fileSize(), (u4)(dexUtil->base() + pDexMethodr->codeOff))) {
-        is_out.is_code_item_out = true;
-    }
-
-    C_CLS(pClassDatar);
 
     // append data
     // class_data_item
     List* classdataList = make_class_data(dexUtil, is_out);
     assert(!classdataList);
     //code_item
-    List* codelist = make_code_item(dexUtil, is_out);
+    u4 begin = (0 + dexUtil->fileSize() + classdataList->all_size);
+    List* codelist = make_code_item(dexUtil, is_out, begin);
     assert(!codelist);
 
     // repair classoff
     DexHeader* header = (DexHeader*) dexbuf;
     DexClassDef* classDef = (DexClassDef* )((u1*) dexbuf + header->classDefsOff);
-
     repair_class_data_off(classDef, header->classDefsSize, classdataList);
-
+    // reapair codeoff
     u1* class_data_buf = repair_codeoff(dexUtil, classdataList, codelist);
     assert(!class_data_buf);
 
@@ -362,8 +364,9 @@ static List* make_class_data(DexUtil* dexUtil, IS_OUT is_out) {
 
             const DexClassDef* classDef = dexUtil->dexGetClassDef(i);
 
-            off += classDataSize;
             list_add(classdataList, classDataSize, (u1*)pEncodedData, off);
+            off += classDataSize;
+
             CLS(pClassData);
         }
     }
@@ -374,11 +377,8 @@ static List* make_class_data(DexUtil* dexUtil, IS_OUT is_out) {
 // 直接追加到文件尾
 // |dex file|class_data|
 // classdef->classDataOff = base + dexfile_len + i* class_data
-static List* make_code_item(DexUtil* dexUtil, IS_OUT is_out) {
+static List* make_code_item(DexUtil* dexUtil, IS_OUT is_out, u4 begin) {
     u4 methodSize = dexUtil->methodCount(); // 足够容纳code了，因为还有code_off为0的方法
-    u4 class_data_len = dexUtil->classCount() * sizeof(DexClassData);
-    u4 begin = (0 + dexUtil->fileSize() + class_data_len);
-
     List* codeList = create_list(methodSize);
     u4 off = begin;
 
@@ -398,8 +398,8 @@ static List* make_code_item(DexUtil* dexUtil, IS_OUT is_out) {
                     const DexCode* dexCode = dexUtil->dexGetCode(pDexMethod);
                     if(!dexCode) {
                         code_size = dexUtil->getDexCodeSize(dexCode);
-                        off += code_size;
                         list_add(codeList, code_size, (u1*) dexCode, off);
+                        off += code_size;
                     }
                 }
             }
@@ -411,8 +411,8 @@ static List* make_code_item(DexUtil* dexUtil, IS_OUT is_out) {
                     const DexCode* dexCode = dexUtil->dexGetCode(pDexMethod);
                     if(!dexCode) {
                         code_size = dexUtil->getDexCodeSize(dexCode);
-                        off += code_size;
                         list_add(codeList, code_size, (u1*) dexCode, off);
+                        off += code_size;
                     }
                 }
             }
