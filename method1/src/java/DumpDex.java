@@ -47,9 +47,16 @@ import java.lang.reflect.Method;
  * 还有很多其他工具
  * 安卓源码提供了很多丰富的工具，包括任意方式解析dex，包括细粒化到解析code，这并不需要调用invoke
  *
+ * java-class - vm class
+ * 反射 class 等同于 jni-findclass
+ * java-class 主动调用方法 | jni-jclass-CallXXXMethod 最终都走向 vm runtime - method
+ * vm试图
+ * ClassObject|Class - Method|ArtMethod（vm试图）中直接或者间接带有文件试图的结构（如Code）
  *
- * java-class  jni-jclass -  runtime - method
- * ClassObject - method
+ * 那实际上可以通过反射找到对应vm的class结构 ，通过findMethodId找到对应的VM method结构
+ * 来还原，这样是否可以不用invoke，需要验证？？
+ *
+ * 如果调用则可以如下：
  * 单解释模式（5.02）：
  * java invoke(method）
  * |/
@@ -69,7 +76,7 @@ import java.lang.reflect.Method;
  *
  * 还是我是一个不负责任的人，我没有测试过代码，因为本身就是写着玩， 如果想让这个项目跑起来，估计需要你
  * 在次基础上进行开发和调试 哈哈
- * 
+ *
  * 其他的后续在补充吧，太累，另外再次强调代码可能存在问题哦
  *
  * </b>
