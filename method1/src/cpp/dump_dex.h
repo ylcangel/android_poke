@@ -12,7 +12,7 @@
 #include <vector>
 #include <stdlib.h>
 #include <stdio.h>
-
+#include <string.h>
 #include <fcntl.h>
 #include <errno.h>
 #include <unistd.h>
@@ -184,9 +184,19 @@ static bool is_outof_dex(u4 begin, u4 len, u4 wh) {
     return true;
 }
 
+u4 align_to(u4 offset, u4 unitSize) {
+    u4	alignmentMask	= unitSize - 1;
+    offset = (offset + alignmentMask) & ~alignmentMask;
+    return offset;
+}
+
+u4 alignTo(u4 off) {
+    int mask = off - 1;
+    return (off + mask) & ~mask;
+}
 
 typedef struct {
-    u4 off; // 修复后的偏移|dex file|class_data|code_item|
+    u4 off; // 修复后的偏移|dex file|class_data|code_item|，如果codeoff是0对应dexcode为NULL
     // ClassData为sizeof(DexClassData) +
     //    (header.staticFieldsSize * sizeof(DexField)) +
     //    (header.instanceFieldsSize * sizeof(DexField)) +
@@ -198,8 +208,8 @@ typedef struct {
 } _DataItem;
 
 typedef struct Node {
-    u4 max_count; // 仅用于dexcode
-    u4 count; // classdata或者dexcode个数
+    u4 max_count; // method 或者 class最大数
+    u4 count; // 当前classdata或者dexcode个数
     u4 all_size; // 仅用于dexcode
     _DataItem** next;
 } List;
@@ -217,15 +227,15 @@ static List* create_list(u4 list_size) {
     return list;
 }
 
-static void list_add(List* list, u4 _size, u1* buf, u4 off) {
+static void list_add(List* list, u4 buf_size, u1* buf, u4 align_size, u4 off) {
     _DataItem* _dataItem = (_DataItem*)malloc(sizeof(_DataItem));
     assert(!_dataItem);
 
     _dataItem->off = off;
-    _dataItem->size = _size;
+    _dataItem->size = buf_size;
     _dataItem->buf = buf;
 
-    list->all_size += _dataItem->size;
+    list->all_size += align_size;
     list->next[list->count] = _dataItem;
     list->count += 1;
 }
@@ -246,7 +256,8 @@ static List* make_class_data(DexUtil* dexUtil, IS_OUT is_out);
 static void repair_class_data_off(DexClassDef* classDef, u4 classCount, List* class_data_list);
 static List* make_code_item(DexUtil* dexUtil, IS_OUT is_out, u4 begin);
 static u1* repair_codeoff(DexUtil* dexUtil, List* class_data_list, List* codelist);
-
+static void write_class_data(u1* pData, const DexClassData* dexClassData);
+static u1* make_code_item_buf(List* codeList, u4 begin);
 
 #ifdef __cplusplus
 }

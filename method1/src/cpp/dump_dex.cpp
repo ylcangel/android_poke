@@ -298,8 +298,9 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
     // class_data_item
     List* classdataList = make_class_data(dexUtil, is_out);
     assert(!classdataList);
-    //code_item
     u4 begin = (0 + dexUtil->fileSize() + classdataList->all_size);
+
+    // code_item
     List* codelist = make_code_item(dexUtil, is_out, begin);
     assert(!codelist);
 
@@ -318,7 +319,6 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
     }
 
     // reapair header filesize
-
     header->fileSize += (classdataList->all_size + codelist->all_size);
     // write origin dexfile
     write(fd, dexbuf, dexUtil->fileSize());
@@ -327,10 +327,9 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
     write(fd, class_data_buf, classdataList->all_size);
     fsync(fd);
     //append code_item
-    for(int ci = 0; ci < codelist->count; ci++) {
-        write(fd, codelist->next[ci]->buf, codelist->next[ci]->size);
-    }
 
+    u1* code_item_buf = make_code_item_buf(codelist, (dexUtil->fileSize() + classdataList->all_size));
+    write(fd, code_item_buf, codelist->all_size);
     fsync(fd);
 
     close(fd);
@@ -338,13 +337,15 @@ static int dump_complete_extract_dex(JNIEnv* env, DexFile* dexFile, char* save_p
     list_free(classdataList);
     list_free(codelist);
 
+    C_CLS(class_data_buf);
+    C_CLS(code_item_buf);
     CLS(dexUtil);
     return JNI_OK;
 }
 
 static List* make_class_data(DexUtil* dexUtil, IS_OUT is_out) {
     u4 classCount = dexUtil->classCount();
-    u4 begin = dexUtil->fileSize() ;
+    u4 begin = (0 + dexUtil->fileSize()); // 文件偏移 base = 0
 
     List* classdataList = create_list(classCount);
     u4 off = begin;
@@ -356,15 +357,19 @@ static List* make_class_data(DexUtil* dexUtil, IS_OUT is_out) {
             const u1* pEncodedData = dexUtil->dexGetClassData(*classDef);
             DexClassData* pClassData = dexUtil->dexReadAndVerifyClassData(&pEncodedData, NULL);
             DexClassDataHeader header = pClassData->header;
-            size_t classDataSize = sizeof(DexClassData) +
+            size_t classDataSize = sizeof(DexClassDataHeader) +
                                 (header.staticFieldsSize * sizeof(DexField)) +
                                 (header.instanceFieldsSize * sizeof(DexField)) +
                                 (header.directMethodsSize * sizeof(DexMethod)) +
                                 (header.virtualMethodsSize * sizeof(DexMethod));
 
             const DexClassDef* classDef = dexUtil->dexGetClassDef(i);
-
-            list_add(classdataList, classDataSize, (u1*)pEncodedData, off);
+            // todo; class_data应该不用对齐
+            // 我观察class_data的偏移有奇数地址
+            // 如果需要对齐，你需要处理align_size
+            // 我觉得不用对齐，所以这里直接传入classDataSize
+            // 这里buf指向pEncodedData，其实它存在意义不大，后续会重新写入
+            list_add(classdataList, classDataSize, (u1*)pEncodedData, classDataSize, off);
             off += classDataSize;
 
             CLS(pClassData);
@@ -377,6 +382,7 @@ static List* make_class_data(DexUtil* dexUtil, IS_OUT is_out) {
 // 直接追加到文件尾
 // |dex file|class_data|
 // classdef->classDataOff = base + dexfile_len + i* class_data
+// 即使codeoff为空也创建一个Item，但是其偏移为0
 static List* make_code_item(DexUtil* dexUtil, IS_OUT is_out, u4 begin) {
     u4 methodSize = dexUtil->methodCount(); // 足够容纳code了，因为还有code_off为0的方法
     List* codeList = create_list(methodSize);
@@ -395,12 +401,17 @@ static List* make_code_item(DexUtil* dexUtil, IS_OUT is_out, u4 begin) {
             if(methodsSize > 0) {
                 for(int j = 0; j < methodsSize; j++) {
                     pDexMethod = &pClassData->directMethods[j];
+                    u4 old_off = off;
+                    // 按四字节对齐
+                    off = alignTo(off);
                     const DexCode* dexCode = dexUtil->dexGetCode(pDexMethod);
-                    if(!dexCode) {
-                        code_size = dexUtil->getDexCodeSize(dexCode);
-                        list_add(codeList, code_size, (u1*) dexCode, off);
-                        off += code_size;
-                    }
+                    code_size = dexUtil->getDexCodeSize(dexCode);
+                    u4 align_size = code_size;
+                    align_size += (off - old_off);
+                    // 如果code_off 为0， 则传入dexCode = NULL
+                    // 后面需要依据这个判断
+                    list_add(codeList, code_size, (u1*) dexCode, align_size, off);
+                    off += align_size;
                 }
             }
 
@@ -408,12 +419,15 @@ static List* make_code_item(DexUtil* dexUtil, IS_OUT is_out, u4 begin) {
             if(methodsSize > 0) {
                 for(int j = 0; j < methodsSize; j++) {
                     pDexMethod = &pClassData->virtualMethods[j];
+                    u4 old_off = off;
+                    // 按四字节对齐
+                    off = alignTo(off);
                     const DexCode* dexCode = dexUtil->dexGetCode(pDexMethod);
-                    if(!dexCode) {
-                        code_size = dexUtil->getDexCodeSize(dexCode);
-                        list_add(codeList, code_size, (u1*) dexCode, off);
-                        off += code_size;
-                    }
+                    code_size = dexUtil->getDexCodeSize(dexCode);
+                    u4 align_size = code_size;
+                    align_size += (off - old_off);
+                    list_add(codeList, code_size, (u1*) dexCode, align_size, off);
+                    off += align_size;
                 }
             }
 
@@ -444,24 +458,30 @@ static u1* repair_codeoff(DexUtil* dexUtil, List* class_data_list, List* codelis
     u1* class_data_buf = (u1*) malloc(class_data_list->all_size);
     assert(!class_data_buf);
 
+    memset(class_data_buf, 0, class_data_list->all_size);
+
+    u1* pData = class_data_buf;
+
     for( int i = 0 ; i < dexUtil->classCount(); i++) {
         const DexClassDef *classDef = dexUtil->dexGetClassDef(i);
         const u1* pEncodedData = dexUtil->dexGetClassData(*classDef);
         DexClassData* pClassData = dexUtil->dexReadAndVerifyClassData(&pEncodedData, NULL);
 
-        const DexMethod* pDexMethod;
+        DexMethod* pDexMethod;
         u4 code_size = 0;
-
         DexClassData* dexClassDatar = (DexClassData*) class_data_list->next[i]->buf;
-        DexMethod* dexMethodr;
+
         int methodsSize = (int)pClassData->header.directMethodsSize;
         if(methodsSize > 0) {
             for(int j = 0; j < methodsSize; j++) {
                 pDexMethod = &pClassData->directMethods[j];
-                dexMethodr = &dexClassDatar->directMethods[j];
                 const DexCode* dexCode = dexUtil->dexGetCode(pDexMethod);
+
+
                 if(!dexCode) {
-                     writeUnsignedLeb128((u1*)(&dexMethodr->codeOff), codelist->next[codeIndex++]->off);
+                    pDexMethod->codeOff = codelist->next[codeIndex++]->off;
+                } else { // codeOff = 0, 不需要修正，但是codeIndex需要加1
+                    codeIndex++;
                 }
             }
         }
@@ -470,18 +490,66 @@ static u1* repair_codeoff(DexUtil* dexUtil, List* class_data_list, List* codelis
         if(methodsSize > 0) {
             for(int j = 0; j < methodsSize; j++) {
                 pDexMethod = &pClassData->virtualMethods[j];
-                dexMethodr = &dexClassDatar->directMethods[j];
                 const DexCode* dexCode = dexUtil->dexGetCode(pDexMethod);
                 if(!dexCode) {
-                    writeUnsignedLeb128((u1*) (&dexMethodr->codeOff), codelist->next[codeIndex++]->off);
+                    pDexMethod->codeOff = codelist->next[codeIndex++]->off;
+                } else { // codeOff = 0, 不需要修正，但是codeIndex需要加1
+                    codeIndex++;
                 }
             }
         }
 
-        C_CLS(pClassData);
+        // 写入class_data_buf
+        write_class_data(pData, pClassData);
 
-        memcpy(class_data_buf, class_data_list->next[i]->buf, class_data_list->next[i]->size);
-        class_data_buf += class_data_list->next[i]->size;
+        C_CLS(pClassData);
     }
 }
 
+static void write_class_data(u1* pData, const DexClassData* dexClassData) {
+    const DexClassDataHeader* pHeader = &dexClassData->header;
+    pData = writeUnsignedLeb128(pData, pHeader->staticFieldsSize);
+    pData = writeUnsignedLeb128(pData, pHeader->instanceFieldsSize);
+    pData = writeUnsignedLeb128(pData, pHeader->directMethodsSize);
+    pData = writeUnsignedLeb128(pData, pHeader->virtualMethodsSize);
+
+    for(int i = 0; i < pHeader->staticFieldsSize; i++) {
+        DexField* pItem = &dexClassData->staticFields[i];
+        pData = writeUnsignedLeb128(pData, pItem->fieldIdx);
+        pData = writeUnsignedLeb128(pData, pItem->accessFlags);
+    }
+
+    for(int i = 0; i < pHeader->instanceFieldsSize; i++) {
+        DexField* pItem = &dexClassData->instanceFields[i];
+        pData = writeUnsignedLeb128(pData, pItem->fieldIdx);
+        pData = writeUnsignedLeb128(pData, pItem->accessFlags);
+    }
+
+    for (int i = 0; i < pHeader->directMethodsSize; i++) {
+        DexMethod* pItem = &dexClassData->directMethods[i];
+        pData = writeUnsignedLeb128(pData, pItem->methodIdx);
+        pData = writeUnsignedLeb128(pData, pItem->accessFlags);
+        pData = writeUnsignedLeb128(pData, pItem->codeOff);
+    }
+
+    for (int i = 0; i < pHeader->virtualMethodsSize; i++) {
+        DexMethod* pItem = &dexClassData->virtualMethods[i];
+        pData = writeUnsignedLeb128(pData, pItem->methodIdx);
+        pData = writeUnsignedLeb128(pData, pItem->accessFlags);
+        pData = writeUnsignedLeb128(pData, pItem->codeOff);
+    }
+}
+
+static u1* make_code_item_buf(List* codeList, u4 begin) {
+    u1* code_item_buf = (u1*) malloc(codeList->all_size);
+    assert(!code_item_buf);
+    memset(code_item_buf, 0, codeList->all_size);
+
+    for(int ci = 0; ci < codeList->count; ci++) {
+        if(!codeList->next[ci]->buf) {
+            memcpy((code_item_buf + (codeList->next[ci]->off - begin)), codeList->next[ci]->buf, codeList->next[ci]->size);
+        }
+    }
+
+    return code_item_buf;
+}
